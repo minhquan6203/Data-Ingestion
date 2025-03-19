@@ -1,0 +1,56 @@
+version: 2
+
+sources:
+  - name: bronze
+    database: datawarehouse
+    schema: bronze
+    tables:
+      - name: bronze_customers
+        description: Raw customer data
+        columns:
+          - name: customer_id
+            description: Unique customer identifier
+            tests:
+              - not_null
+          - name: name
+            description: Customer name
+          - name: email
+            description: Customer email address
+          - name: registration_date
+            description: Date of customer registration
+          - name: country
+            description: Customer country
+      
+      - name: bronze_orders
+        description: Raw order data
+        columns:
+          - name: order_id
+            description: Unique order identifier
+            tests:
+              - not_null
+          - name: customer_id
+            description: Customer who placed the order
+            tests:
+              - not_null
+          - name: order_date
+            description: Date and time when order was placed
+          - name: total_amount
+            description: Total order amount
+          - name: status
+            description: Order status
+      
+      - name: bronze_products
+        description: Raw product data
+        columns:
+          - name: product_id
+            description: Unique product identifier
+            tests:
+              - not_null
+          - name: name
+            description: Product name
+          - name: category
+            description: Product category
+          - name: price
+            description: Product price
+          - name: in_stock
+            description: Whether product is in stock 
