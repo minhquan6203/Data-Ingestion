@@ -1,6 +1,19 @@
 @echo off
+setlocal enabledelayedexpansion
+
+if "%1"=="incremental" (
+    set DEMO_TYPE=incremental
+) else (
+    set DEMO_TYPE=standard
+)
+
 echo ==========================================
 echo    Data Ingestion Pipeline Demo
+if "!DEMO_TYPE!"=="incremental" (
+    echo    [Incremental Load Mode]
+) else (
+    echo    [Standard Mode]
+)
 echo ==========================================
 echo.
 
@@ -30,9 +43,16 @@ docker-compose up -d etl-app
 echo Done!
 echo.
 
-rem Run all ETL pipelines
-echo Step 5: Running all ETL pipelines...
-docker-compose run --rm etl-app --run-all
+if "!DEMO_TYPE!"=="incremental" (
+    rem Run Incremental Load Demo
+    echo Step 5: Running incremental load demo...
+    docker-compose run --rm etl-app --run-all
+    
+) else (
+    rem Run all ETL pipelines (standard demo)
+    echo Step 5: Running full load demno...
+    docker-compose run --rm etl-app --run-all --full-load
+)
 echo Done!
 echo.
 
@@ -46,11 +66,16 @@ docker-compose exec postgres psql -U postgres -d datawarehouse -c "SELECT * FROM
 echo.
 
 echo ==========================================
+
 echo Demo completed successfully!
+
 echo ==========================================
 echo.
 echo Services running:
 echo - MinIO UI: http://localhost:9001 (login: minioadmin/minioadmin)
 echo - PostgreSQL: localhost:5432 (login: postgres/postgres)
 echo.
-echo To stop all services, run: docker-compose down 
+echo To stop all services, run: docker-compose down
+
+echo.
+echo To run the incremental load demo: %0 incremental 

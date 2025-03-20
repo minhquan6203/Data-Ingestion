@@ -11,12 +11,13 @@ from src.audit.audit import ETLAuditor
 from src.notification.notification import ETLNotifier
 
 
-def transform_to_gold(pipeline_config, audit=True, notify=True):
+def transform_to_gold(pipeline_config, incremental=False, audit=True, notify=True):
     """
     Transform data from silver to gold layer using SQL
     
     Args:
         pipeline_config: Pipeline configuration from metadata
+        incremental: Whether to use incremental loading
         audit: Whether to create audit records
         notify: Whether to send notifications
         
@@ -27,11 +28,14 @@ def transform_to_gold(pipeline_config, audit=True, notify=True):
     sources = pipeline_config.get("sources", [])
     destination = pipeline_config.get("destination")
     sql_transform = pipeline_config.get("sql_transform")
+    incremental_condition = pipeline_config.get("incremental_condition", "")
     
     if not sql_transform:
         raise ValueError("SQL transform is required for gold layer transformation")
     
-    logger.info(f"Transforming data to gold layer: {destination}")
+    # Determine load mode
+    load_type = "incremental" if incremental and incremental_condition else "full"
+    logger.info(f"Transforming data to gold layer: {destination} (mode: {load_type})")
     
     # Create SparkSession
     spark = create_spark_session()
@@ -44,7 +48,8 @@ def transform_to_gold(pipeline_config, audit=True, notify=True):
         auditor = ETLAuditor(
             pipeline_id=pipeline_config.get("id", destination),
             source_name=source_name,
-            destination_name=f"gold.{destination}"
+            destination_name=f"gold.{destination}",
+            load_type=load_type
         )
         
         if notify:
@@ -64,8 +69,70 @@ def transform_to_gold(pipeline_config, audit=True, notify=True):
         
         # Execute the SQL transformation
         logger.info(f"Executing SQL transformation for {destination}")
-        result_df = spark.sql(sql_transform)
         
+        # For incremental loads, try to add a filter
+        sql_with_filter = sql_transform
+        if incremental and incremental_condition:
+            try:
+                # Try to read the table to see if it exists
+                exists_result = execute_sql(
+                    f"""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'gold' 
+                        AND table_name = '{destination}'
+                    );
+                    """, 
+                    fetch=True
+                )
+                table_exists = exists_result[0][0] if exists_result else False
+                
+                if table_exists:
+                    # Get the max date for the incremental filter
+                    max_date = None
+                    count_result = execute_sql(f"SELECT COUNT(*) FROM gold.{destination}", fetch=True)
+                    has_records = count_result[0][0] > 0 if count_result else False
+                    
+                    if has_records:
+                        # For gold_order_summary, we're using 'last_order_date' as the incremental column
+                        max_date_result = execute_sql(f"SELECT MAX(last_order_date) FROM gold.{destination}", fetch=True)
+                        max_date = max_date_result[0][0] if max_date_result and max_date_result[0][0] else None
+                    
+                    if max_date:
+                        # Add the incremental filter to the SQL by adding to JOIN condition
+                        # This avoids the issue of trying to put WHERE after GROUP BY
+                        if "JOIN silver_customers c ON" in sql_transform:
+                            # Add to the JOIN condition before GROUP BY
+                            modified_sql = sql_transform.replace(
+                                "JOIN silver_customers c ON o.customer_id = c.customer_id",
+                                f"JOIN silver_customers c ON o.customer_id = c.customer_id AND o.order_date > '{max_date}'"
+                            )
+                            sql_with_filter = modified_sql
+                            logger.info(f"Added incremental filter condition with max_date: {max_date}")
+                        else:
+                            # Fallback to full load if we can't safely modify
+                            logger.warning(f"Cannot safely add incremental filter, using full load")
+                            sql_with_filter = sql_transform
+                    else:
+                        logger.info(f"No valid max date found in {destination}, performing full load")
+                        sql_with_filter = sql_transform
+            except Exception as e:
+                if "FileNotFoundException" in str(e):
+                    logger.warning(f"Parquet files not found when checking {destination}: {e}")
+                    if incremental and incremental_condition:
+                        logger.warning(f"Will continue with incremental transformation despite missing files")
+                    sql_with_filter = sql_transform
+                else:
+                    logger.warning(f"Error checking gold table or getting max date: {e}, falling back to full load")
+                    sql_with_filter = sql_transform
+        else:
+            # For full loads, use the original SQL
+            sql_with_filter = sql_transform
+        
+        # Execute the final SQL query
+        logger.info(f"Executing final SQL transformation")
+        result_df = spark.sql(sql_with_filter)
+            
         # Get record count
         count = result_df.count()
         logger.info(f"Transformed {count} records to gold.{destination}")
@@ -83,47 +150,93 @@ def transform_to_gold(pipeline_config, audit=True, notify=True):
         for field in result_df.schema.fields:
             field_type = field.dataType.simpleString()
             # Map Spark types to our simplified type system
-            if "string" in field_type.lower():
-                schema_dict[field.name] = "string"
-            elif "int" in field_type.lower():
-                schema_dict[field.name] = "integer"
-            elif "double" in field_type.lower() or "float" in field_type.lower():
-                schema_dict[field.name] = "double"
-            elif "boolean" in field_type.lower():
-                schema_dict[field.name] = "boolean"
-            elif "date" in field_type.lower():
-                schema_dict[field.name] = "date"
-            elif "timestamp" in field_type.lower():
-                schema_dict[field.name] = "timestamp"
+            if "int" in field_type:
+                pg_type = "INTEGER"
+            elif "double" in field_type or "float" in field_type:
+                pg_type = "DOUBLE PRECISION"
+            elif "boolean" in field_type:
+                pg_type = "BOOLEAN"
+            elif "timestamp" in field_type:
+                pg_type = "TIMESTAMP"
+            elif "date" in field_type:
+                pg_type = "DATE"
             else:
-                schema_dict[field.name] = "string"
-                
+                pg_type = "TEXT"
+            
+            schema_dict[field.name] = pg_type
+        
+        primary_key = pipeline_config.get("primary_key")
         create_table_if_not_exists(
-            destination, 
+            destination,
             schema_dict,
-            schema_name="gold"
+            schema_name="gold",
+            primary_key=primary_key
         )
         
-        # Use JDBC to write data directly to PostgreSQL
+        # Write data to PostgreSQL using JDBC connection
         jdbc_url = f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
-        logger.info(f"Writing data to PostgreSQL via JDBC: {jdbc_url}")
         
         try:
-            # Delete existing data
-            execute_sql(f"DELETE FROM gold.{destination}")
-            
-            # Write DataFrame to PostgreSQL
-            result_df.write \
-               .format("jdbc") \
-               .option("url", jdbc_url) \
-               .option("dbtable", f"gold.{destination}") \
-               .option("user", POSTGRES_USER) \
-               .option("password", POSTGRES_PASSWORD) \
-               .option("driver", "org.postgresql.Driver") \
-               .mode("append") \
-               .save()
-               
-            logger.info(f"Successfully wrote data to gold.{destination} via JDBC")
+            # For incremental loads, we use a merge operation if an incremental condition is specified
+            # Otherwise we use a full load with delete and insert
+            if incremental and incremental_condition:
+                logger.info(f"Incremental load: Using merge operation for gold.{destination}")
+                
+                # Save to temporary table first
+                temp_table = f"temp_{destination}"
+                result_df.write \
+                   .format("jdbc") \
+                   .option("url", jdbc_url) \
+                   .option("dbtable", f"gold.{temp_table}") \
+                   .option("user", POSTGRES_USER) \
+                   .option("password", POSTGRES_PASSWORD) \
+                   .option("driver", "org.postgresql.Driver") \
+                   .mode("overwrite") \
+                   .save()
+                   
+                # Get primary key from config or use the first column
+                primary_key = pipeline_config.get("primary_key", result_df.columns[0])
+                
+                # Create temporary table if it doesn't exist
+                create_table_if_not_exists(
+                    temp_table, 
+                    schema_dict,
+                    schema_name="gold"
+                )
+                
+                # Execute merge SQL using incremental condition
+                merge_sql = f"""
+                    BEGIN;
+                    -- Insert new records or update existing ones
+                    INSERT INTO gold.{destination}
+                    SELECT * FROM gold.{temp_table}
+                    ON CONFLICT ({primary_key})
+                    DO UPDATE SET 
+                        {', '.join([f'"{col}" = EXCLUDED."{col}"' for col in result_df.columns if col != primary_key])};
+                    
+                    -- Clean up temp table
+                    DROP TABLE IF EXISTS gold.{temp_table};
+                    COMMIT;
+                """
+                execute_sql(merge_sql)
+                logger.info(f"Successfully merged data into gold.{destination} (incremental load)")
+            else:
+                # Full load - delete and insert
+                logger.info(f"Full load: Replacing all data in gold.{destination}")
+                execute_sql(f"DELETE FROM gold.{destination}")
+                
+                # Write DataFrame to PostgreSQL
+                result_df.write \
+                   .format("jdbc") \
+                   .option("url", jdbc_url) \
+                   .option("dbtable", f"gold.{destination}") \
+                   .option("user", POSTGRES_USER) \
+                   .option("password", POSTGRES_PASSWORD) \
+                   .option("driver", "org.postgresql.Driver") \
+                   .mode("append") \
+                   .save()
+                   
+                logger.info(f"Successfully wrote data to gold.{destination} via JDBC (full load)")
         except Exception as e:
             logger.error(f"Error writing data to PostgreSQL via JDBC: {e}")
             import traceback
@@ -155,7 +268,7 @@ def transform_to_gold(pipeline_config, audit=True, notify=True):
             
             if notify:
                 source_name = ", ".join(f"silver.{s}" for s in sources)
-                duration = (auditor.end_time - auditor.start_time).total_seconds()
+                duration = (auditor.end_time - auditor.start_time).total_seconds() if auditor.end_time else 0
                 ETLNotifier.notify_pipeline_failure(
                     pipeline_id=pipeline_config.get("id", destination),
                     source_name=source_name,

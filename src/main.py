@@ -70,6 +70,13 @@ def parse_args():
         help="Run pipelines sequentially instead of in parallel"
     )
     
+    # Add incremental/full load option
+    parser.add_argument(
+        "--full-load",
+        action="store_true",
+        help="Perform a full load instead of incremental load"
+    )
+    
     # Add test-audit argument
     parser.add_argument(
         "--test-audit",
@@ -116,17 +123,34 @@ def show_execution_history():
     print("==========================")
     
     for record in history:
-        audit_id, pipeline_id, source, destination, start_time, end_time, records, status, error = record
+        audit_id, pipeline_id, source, destination, start_time, end_time, records, status, error, load_type, metadata = record
         
         duration = "N/A"
         if end_time and start_time:
             duration = f"{(end_time - start_time).total_seconds():.2f}s"
         
+        # Parse metadata if available
+        metadata_info = ""
+        if metadata:
+            try:
+                import json
+                meta_dict = json.loads(metadata)
+                if "incremental_column" in meta_dict and "last_timestamp" in meta_dict:
+                    metadata_info = f"\n  Incremental on: {meta_dict['incremental_column']}"
+                    if meta_dict.get("last_timestamp"):
+                        metadata_info += f" (from: {meta_dict['last_timestamp']})"
+            except Exception as e:
+                logger.error(f"Error parsing metadata: {e}")
+        
         print(f"Pipeline: {pipeline_id}")
+        print(f"  Load Type: {load_type or 'full'}")
         print(f"  Status: {status}")
         print(f"  Start: {start_time}")
         print(f"  Duration: {duration}")
         print(f"  Records: {records or 0}")
+        
+        if metadata_info:
+            print(metadata_info)
         
         if status == "FAILED" and error:
             print(f"  Error: {error}")
@@ -149,6 +173,10 @@ def main():
     
     # Create ETL controller
     controller = ETLController()
+    
+    # Determine load type (incremental by default)
+    incremental = not args.full_load
+    load_type = "full" if args.full_load else "incremental"
     
     # Test audit functionality if requested
     if args.test_audit:
@@ -184,8 +212,8 @@ def main():
             print(f"Pipeline '{pipeline_id}' not found. Use --list-pipelines to see available pipelines.")
             return
         
-        print(f"Running pipeline: {pipeline_id}")
-        success = controller.run_pipeline(pipeline_id)
+        print(f"Running pipeline: {pipeline_id} ({load_type} load)")
+        success = controller.run_pipeline(pipeline_id, incremental=incremental)
         
         if success:
             print(f"Pipeline {pipeline_id} completed successfully")
@@ -203,17 +231,17 @@ def main():
             print(f"Pipeline '{pipeline_id}' not found. Use --list-pipelines to see available pipelines.")
             return
         
-        print(f"Scheduling pipeline {pipeline_id} to run every {interval} seconds.")
+        print(f"Scheduling pipeline {pipeline_id} to run every {interval} seconds ({load_type} load).")
         print("Press Ctrl+C to stop.")
         
-        controller.schedule_pipeline(pipeline_id, interval)
+        controller.schedule_pipeline(pipeline_id, interval, incremental=incremental)
         return
     
     if args.run_all:
         parallel = not args.sequential
-        print(f"Running all pipelines {'sequentially' if not parallel else 'in parallel'}")
+        print(f"Running all pipelines {'sequentially' if not parallel else 'in parallel'} ({load_type} load)")
         
-        results = controller.run_all_pipelines(parallel=parallel)
+        results = controller.run_all_pipelines(parallel=parallel, incremental=incremental)
         
         successful = sum(1 for result in results.values() if result)
         failed = len(results) - successful
@@ -233,6 +261,7 @@ def main():
     print("  --list-pipelines           : List all available pipelines")
     print("  --show-history             : Show pipeline execution history")
     print("  --schedule PIPELINE_ID     : Schedule a pipeline to run at regular intervals")
+    print("  --full-load                : Perform a full load instead of incremental load (default: incremental)")
     print("  --help                     : Show all available options")
 
 

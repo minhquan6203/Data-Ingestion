@@ -153,10 +153,25 @@ def initialize_postgres_schema():
         end_time TIMESTAMP,
         records_processed INT,
         status VARCHAR(20) DEFAULT 'RUNNING',
-        error_message TEXT
+        error_message TEXT,
+        load_type VARCHAR(20) DEFAULT 'full',
+        metadata JSONB
     );
     """
     execute_sql(create_audit_table_sql)
+    
+    # Create watermarks table for incremental loads
+    create_watermarks_table_sql = """
+    CREATE TABLE IF NOT EXISTS public.etl_watermarks (
+        watermark_id SERIAL PRIMARY KEY,
+        table_name VARCHAR(100) NOT NULL,
+        column_name VARCHAR(100) NOT NULL,
+        max_value TEXT NOT NULL,
+        last_updated TIMESTAMP NOT NULL DEFAULT NOW(),
+        UNIQUE(table_name, column_name)
+    );
+    """
+    execute_sql(create_watermarks_table_sql)
     
     logger.info("PostgreSQL schema initialized successfully")
 
@@ -164,38 +179,38 @@ def initialize_postgres_schema():
 def create_table_if_not_exists(table_name, schema_dict, schema_name="public", primary_key=None):
     """
     Create a table in PostgreSQL if it doesn't exist
-
+    
     Args:
-        table_name: Name of the table
-        schema_dict: Dictionary mapping column names to data types
-        schema_name: Schema name
-        primary_key: Primary key column
+        table_name: Name of the table to create
+        schema_dict: Dictionary mapping column names to their types
+        schema_name: Schema name in PostgreSQL
+        primary_key: Column name to use as primary key
     """
     columns = []
+    for col_name, col_type in schema_dict.items():
+        # Map our simple types to PostgreSQL types
+        pg_type = "TEXT"
+        if col_type.lower() == "integer":
+            pg_type = "INTEGER"
+        elif col_type.lower() == "double":
+            pg_type = "DOUBLE PRECISION"
+        elif col_type.lower() == "boolean":
+            pg_type = "BOOLEAN"
+        elif col_type.lower() == "date":
+            pg_type = "DATE"
+        elif col_type.lower() == "timestamp":
+            pg_type = "TIMESTAMP"
+            
+        columns.append(f"\"{col_name}\" {pg_type}")
     
-    # Map Spark/Python types to PostgreSQL types
-    type_mapping = {
-        "string": "TEXT",
-        "date": "DATE",
-        "timestamp": "TIMESTAMP",
-        "int": "INTEGER",
-        "integer": "INTEGER",
-        "long": "BIGINT",
-        "double": "DOUBLE PRECISION",
-        "float": "REAL",
-        "boolean": "BOOLEAN"
-    }
-    
-    for column_name, data_type in schema_dict.items():
-        pg_type = type_mapping.get(data_type.lower(), "TEXT")
-        columns.append(f"\"{column_name}\" {pg_type}")
-    
-    if primary_key:
-        columns.append(f"PRIMARY KEY (\"{primary_key}\")")
+    # Add primary key constraint if specified
+    primary_key_clause = ""
+    if primary_key and primary_key in schema_dict:
+        primary_key_clause = f", PRIMARY KEY (\"{primary_key}\")"
     
     create_table_sql = f"""
     CREATE TABLE IF NOT EXISTS {schema_name}.{table_name} (
-        {', '.join(columns)}
+        {', '.join(columns)}{primary_key_clause}
     );
     """
     

@@ -3,6 +3,7 @@ Audit module for tracking ETL processes
 """
 import time
 from datetime import datetime
+import json
 from loguru import logger
 
 from src.utils.storage_utils import execute_sql
@@ -13,7 +14,7 @@ class ETLAuditor:
     Class for auditing ETL pipeline executions
     """
     
-    def __init__(self, pipeline_id, source_name, destination_name):
+    def __init__(self, pipeline_id, source_name, destination_name, load_type="full"):
         """
         Initialize an ETL audit record
         
@@ -21,16 +22,19 @@ class ETLAuditor:
             pipeline_id: Identifier for the pipeline
             source_name: Name of the source
             destination_name: Name of the destination
+            load_type: Type of load (full or incremental)
         """
         self.pipeline_id = pipeline_id
         self.source_name = source_name
         self.destination_name = destination_name
+        self.load_type = load_type
         self.start_time = datetime.now()
         self.end_time = None
         self.records_processed = 0
         self.status = "RUNNING"
         self.error_message = None
         self.audit_id = None
+        self.metadata = None
         
         # Create the audit record
         self._create_audit_record()
@@ -41,8 +45,8 @@ class ETLAuditor:
         """
         sql = """
         INSERT INTO public.etl_audit 
-            (pipeline_id, source_name, destination_name, start_time, status)
-        VALUES (%s, %s, %s, %s, %s)
+            (pipeline_id, source_name, destination_name, start_time, status, load_type)
+        VALUES (%s, %s, %s, %s, %s, %s)
         RETURNING audit_id;
         """
         
@@ -51,11 +55,12 @@ class ETLAuditor:
             self.source_name,
             self.destination_name,
             self.start_time,
-            self.status
+            self.status,
+            self.load_type
         )
         
         try:
-            logger.debug(f"Creating audit record for pipeline: {self.pipeline_id}")
+            logger.debug(f"Creating audit record for pipeline: {self.pipeline_id} (load type: {self.load_type})")
             result = execute_sql(sql, params, fetch=True)
             
             if result and len(result) > 0 and len(result[0]) > 0:
@@ -93,14 +98,16 @@ class ETLAuditor:
         
         self._update_audit_record()
     
-    def set_records_processed(self, records_processed):
+    def set_records_processed(self, records_processed, metadata=None):
         """
         Set the number of records processed
         
         Args:
             records_processed: Number of records processed
+            metadata: Additional metadata about the processing (dict)
         """
         self.records_processed = records_processed
+        self.metadata = metadata
         self._update_audit_record()
     
     def _update_audit_record(self):
@@ -110,13 +117,22 @@ class ETLAuditor:
         if self.audit_id is None:
             logger.error("Cannot update audit record: No audit_id available")
             return
+        
+        # Convert metadata to JSON string if it exists
+        metadata_json = None
+        if self.metadata:
+            try:
+                metadata_json = json.dumps(self.metadata)
+            except Exception as e:
+                logger.error(f"Failed to convert metadata to JSON: {e}")
             
         sql = """
         UPDATE public.etl_audit
         SET status = %s,
             records_processed = %s,
             end_time = %s,
-            error_message = %s
+            error_message = %s,
+            metadata = %s
         WHERE audit_id = %s;
         """
         
@@ -125,6 +141,7 @@ class ETLAuditor:
             self.records_processed,
             self.end_time,
             self.error_message,
+            metadata_json,
             self.audit_id
         )
         
@@ -160,8 +177,14 @@ class ETLAuditor:
         self.update_status("COMPLETED")
         
         duration = (self.end_time - self.start_time).total_seconds()
-        logger.info(f"Pipeline {self.pipeline_id} completed successfully. " \
-                  f"Processed {records_processed} records in {duration:.2f} seconds")
+        
+        # Enhanced logging for incremental loads
+        if self.load_type == "incremental" and records_processed > 0:
+            logger.info(f"Pipeline {self.pipeline_id} completed successfully ({self.load_type} load). " \
+                      f"Processed {records_processed} new records in {duration:.2f} seconds")
+        else:
+            logger.info(f"Pipeline {self.pipeline_id} completed successfully ({self.load_type} load). " \
+                      f"Processed {records_processed} records in {duration:.2f} seconds")
     
     def complete_with_error(self, error_message, records_processed=0):
         """

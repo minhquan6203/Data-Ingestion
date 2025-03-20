@@ -211,3 +211,52 @@ docker-compose exec postgres psql -U postgres -d datawarehouse -c "SELECT audit_
 # Get summary of pipeline execution times
 docker-compose exec postgres psql -U postgres -d datawarehouse -c "SELECT pipeline_id, AVG(EXTRACT(EPOCH FROM (end_time - start_time))) as avg_duration_seconds, AVG(records_processed) as avg_records FROM public.etl_audit WHERE status = 'COMPLETED' GROUP BY pipeline_id;"
 ```
+
+## Full Load vs Incremental Load
+
+The ETL pipeline supports both full and incremental loading strategies:
+
+- **Full Load**: Processes all data regardless of previous runs
+- **Incremental Load**: Only processes new or changed data since the previous run
+
+### Running Full vs Incremental Loads
+
+```bash
+# For Windows (Command Prompt)
+# Run full load (default)
+run_docker_demo.bat
+
+# Run incremental load
+run_docker_demo.bat incremental
+```
+
+### Checking Load Types and Comparing Results
+
+You can examine the audit records to compare full vs incremental loads:
+
+```bash
+# View full load records and record counts
+docker exec -i data-ingestion-postgres-1 psql -U postgres -d datawarehouse -c "SELECT audit_id, pipeline_id, load_type, status, records_processed FROM etl_audit WHERE load_type = 'full' ORDER BY audit_id DESC LIMIT 10;"
+
+# View incremental load records and record counts
+docker exec -i data-ingestion-postgres-1 psql -U postgres -d datawarehouse -c "SELECT audit_id, pipeline_id, load_type, status, records_processed FROM etl_audit WHERE load_type = 'incremental' ORDER BY audit_id DESC LIMIT 10;"
+
+# View incremental load metadata (shows the watermark values used)
+docker exec -i data-ingestion-postgres-1 psql -U postgres -d datawarehouse -c "SELECT audit_id, pipeline_id, load_type, metadata FROM etl_audit WHERE load_type = 'incremental' AND metadata IS NOT NULL ORDER BY audit_id DESC LIMIT 5;"
+```
+
+### Understanding Incremental Load Metadata
+
+The metadata column in the audit records contains important information about incremental loads:
+- `incremental_column`: The column used to track changes (e.g., timestamps, IDs)
+- `last_timestamp`: The high watermark value from the previous run
+- `filtered_records`: Indicates whether records were filtered based on incremental criteria
+
+### Expected Behavior
+
+When running sequential loads:
+1. First run (full load): Processes all available records
+2. Second run (incremental): Processes only new records since the first run
+3. Third run (incremental, no new data): Processes 0 records if no new data was added
+
+This pattern confirms that the incremental loading strategy is working correctly, only processing data that has changed since the last run.

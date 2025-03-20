@@ -46,6 +46,7 @@ DATA_SOURCES = {
             "in_stock": "boolean"
         },
         "primary_key": "product_id",
+        "incremental_column": "product_id",
         "bronze_table": "bronze_products",
         "silver_table": "silver_products",
     }
@@ -102,6 +103,8 @@ PIPELINES = {
         "sources": ["silver_orders", "silver_customers"],
         "destination": "gold_order_summary",
         "schedule": "daily",
+        "primary_key": "customer_id",
+        "incremental_condition": "o.order_date > ?",
         "sql_transform": """
             SELECT 
                 c.customer_id,
