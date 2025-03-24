@@ -206,7 +206,7 @@ The ETL pipeline includes a robust audit tracking system that logs the execution
 
 ```bash
 # View the most recent audit records
-docker-compose exec postgres psql -U postgres -d datawarehouse -c "SELECT audit_id, pipeline_id, status, records_processed, start_time, end_time FROM public.etl_audit ORDER BY audit_id DESC LIMIT 10;"
+docker-compose exec postgres psql -U postgres -d datawarehouse -c "SELECT audit_id, pipeline_id, status, records_processed, start_time, end_time FROM public.etl_audit ORDER BY audit_id DESC LIMIT 5;"
 
 # Get summary of pipeline execution times
 docker-compose exec postgres psql -U postgres -d datawarehouse -c "SELECT pipeline_id, AVG(EXTRACT(EPOCH FROM (end_time - start_time))) as avg_duration_seconds, AVG(records_processed) as avg_records FROM public.etl_audit WHERE status = 'COMPLETED' GROUP BY pipeline_id;"
@@ -236,10 +236,10 @@ You can examine the audit records to compare full vs incremental loads:
 
 ```bash
 # View full load records and record counts
-docker exec -i data-ingestion-postgres-1 psql -U postgres -d datawarehouse -c "SELECT audit_id, pipeline_id, load_type, status, records_processed FROM etl_audit WHERE load_type = 'full' ORDER BY audit_id DESC LIMIT 10;"
+docker exec -i data-ingestion-postgres-1 psql -U postgres -d datawarehouse -c "SELECT audit_id, pipeline_id, load_type, status, records_processed FROM etl_audit WHERE load_type = 'full' ORDER BY audit_id DESC LIMIT 5;"
 
 # View incremental load records and record counts
-docker exec -i data-ingestion-postgres-1 psql -U postgres -d datawarehouse -c "SELECT audit_id, pipeline_id, load_type, status, records_processed FROM etl_audit WHERE load_type = 'incremental' ORDER BY audit_id DESC LIMIT 10;"
+docker exec -i data-ingestion-postgres-1 psql -U postgres -d datawarehouse -c "SELECT audit_id, pipeline_id, load_type, status, records_processed FROM etl_audit WHERE load_type = 'incremental' ORDER BY audit_id DESC LIMIT 5;"
 
 # View incremental load metadata (shows the watermark values used)
 docker exec -i data-ingestion-postgres-1 psql -U postgres -d datawarehouse -c "SELECT audit_id, pipeline_id, load_type, metadata FROM etl_audit WHERE load_type = 'incremental' AND metadata IS NOT NULL ORDER BY audit_id DESC LIMIT 5;"
